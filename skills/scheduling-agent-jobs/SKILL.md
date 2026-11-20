@@ -37,7 +37,7 @@ Read the command file the job runs in full, including any configuration it reads
 - **Output file:** the path it writes. `jobs.py` can't compute a path per run, such as a dated or week-numbered folder. For such a command, offer the user a stable `expectedFile` (for example, have the prompt also write a fixed `latest.md`), or stop and ask.
 - **Steps that wait on the user:** questions, confirmations, opening an app or editor, and committing.
 - **One-way actions:** marking email read, posting, and sending. Note what must succeed before each one.
-- **Sources:** every tool it calls, such as an MCP server, gh, glab, or AppleScript. Each can fail unattended: auth expires overnight, and an app's first AppleScript call under launchd waits on a macOS Automation prompt that only the step 5 real run can surface.
+- **Sources:** every tool it calls, such as an MCP server, gh, glab, or AppleScript. Each can fail unattended: a sign-in can expire before the next run, and an app's first AppleScript call under launchd waits on a macOS Automation prompt that only the step 5 real run can surface.
 - **Sign-in lifetimes:** an unattended run can't sign in again. A tool whose login expires between runs fails once it lapses, so reach that source through a tool with a longer-lived login if there is one.
 - **Dates:** if the command targets "today" or "tomorrow", check the schedule against that. For example, a weekday 6pm run of "tomorrow" briefs Saturday and never Monday.
 
