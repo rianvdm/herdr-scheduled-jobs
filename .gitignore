@@ -1,0 +1,6 @@
+__pycache__/
+.DS_Store
+# Written by herdr-app check
+mods/schedules/gpui-kit.d.ts
+mods/schedules/jsconfig.json
+.superpowers/
