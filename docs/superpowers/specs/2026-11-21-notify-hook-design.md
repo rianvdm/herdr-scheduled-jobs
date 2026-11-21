@@ -28,8 +28,8 @@ A job spec can name a command that `jobs.py` runs after each finished run instea
 
 1. **Separate the outcome from its delivery.** `cmd_exec` builds one outcome after recording the run: `title`, `message` (without the "Click to …" hint), and the click `action`. Delivery then goes to either the hook or terminal-notifier. terminal-notifier output stays word for word what it is today: the hint is added at delivery time.
 2. **Run the hook** when the job has `notify`:
-   - `subprocess.run(command, input=<payload JSON>, cwd=workdir, env=child_env(), timeout=60)`, with stdout and stderr appended to the job's log.
-   - Payload (version 1): `version`, `slug`, `name`, `label`, `runId`, `source`, `status` (`success`, `failed`, `timeout`, or `stopped`), `title`, `message`, `error`, `exitCode`, `startedAt`, `finishedAt`, `durationMs`, `expectedFile`, `logPath`, `logTail` (up to the last 50 lines of this run's part of the log), and `sessionId`.
+   - `subprocess.run(command, input=<payload JSON>, cwd=workdir, env=child_env(), timeout=60)`, with stdout and stderr appended to the job's log. Tests shorten the timeout with `SCHEDULED_JOBS_HOOK_TIMEOUT`.
+   - Payload (version 1): `version`, `slug`, `name`, `label`, `runId`, `source`, `status` (`success`, `failed`, `timeout`, or `stopped`), `title`, `message`, `error`, `exitCode`, `startedAt`, `finishedAt`, `durationMs`, `expectedFile`, `logPath`, `logTail` (up to the last 50 lines of this run's part of the log), `sessionId`, and `resumeHint` (the log's `cd … && claude --resume …` line, or null).
    - Skipped runs (overlap or paused) still send nothing.
    - `NOTIFY_HOOK_BIN`, when set, replaces the whole command with that one executable, the way `NOTIFIER_BIN` replaces terminal-notifier. Tests and the skill's fake run use it, so a fake run never sends a real email.
 3. **Fall back when the hook fails.** A nonzero exit, a timeout, or a command that can't start gets a log line (`notify hook failed (…)`), then the usual terminal-notifier notification, with " The notify hook failed; see the log." added to its message. So a broken mail setup still shows up on the Mac.
@@ -43,7 +43,7 @@ A job spec can name a command that `jobs.py` runs after each finished run instea
 - Subject: `<title>: <message>`, for example "X mentions ready: 3 new X posts."
 - Body (`TextBody`):
   - On success with an `expectedFile`, the file's contents. With no file, the message.
-  - On every other status, the error, the log path, the `claude --resume` hint when there's a `sessionId`, and `logTail`.
+  - On every other status, the error, the log path, `resumeHint` when it's set, and `logTail`.
 - Sends `POST https://api.postmarkapp.com/email`, with the URL overridable through `POSTMARK_API_URL` for tests. It exits 0 on HTTP 200 with `ErrorCode` 0. Otherwise it prints Postmark's `ErrorCode` and `Message` to stderr and exits 1, which triggers the fallback.
 
 ## Tests
@@ -56,7 +56,7 @@ A job spec can name a command that `jobs.py` runs after each finished run instea
   - Validation rejects bad `notify` shapes and a relative or missing first argument.
   - `~` arguments expand.
   - The `notified` value is recorded.
-- New `tests/test_notify_postmark.py`: a local `http.server` stands in for Postmark.
+- New `skills/scheduling-agent-jobs/tests/test_notify_postmark.py`: a local `http.server` stands in for Postmark.
   - Success body is the output file, and the failure body has the error and tail.
   - Env-file parsing, a missing variable, and a missing file each exit 1 with a clear message.
   - Postmark error responses exit 1.
