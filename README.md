@@ -2,7 +2,7 @@
 
 # herdr-scheduled-jobs
 
-Schedule unattended Claude Code runs on your Mac. Ask Claude Code to "run /my-command every weekday at 5am", and launchd starts the run on time, even with every app closed. When a run finishes, the scheduler tries to send a macOS notification with the result. Click it to open the output on success or the log on failure. An optional Schedules tab in the [Herdr](https://herdr.dev) terminal app shows each job's next run and last result, with Run now, Pause, Log, and Open output buttons.
+Schedule unattended Claude Code runs on your Mac. Ask Claude Code to "run /my-command every weekday at 5am", and launchd starts the run on time, even with every app closed. When a run finishes, the scheduler tries to send a macOS notification with the result. Click it to open the output on success or the log on failure. A job can send its result somewhere else instead, such as an email (see "Send results somewhere else"). An optional Schedules tab in the [Herdr](https://herdr.dev) terminal app shows each job's next run and last result, with Run now, Pause, Log, and Open output buttons.
 
 ## Set it up with Claude Code
 
@@ -128,10 +128,37 @@ Each scheduled job is a launchd agent in `~/Library/LaunchAgents/local.scheduled
 - **When jobs run:** while you're logged in, even with Herdr and every terminal closed and the screen locked. If the Mac is asleep at run time, the job runs when it wakes. If the Mac is shut down or you're logged out, the run is skipped, and no notification appears.
 - **Permissions:** jobs run Claude Code with `--permission-mode bypassPermissions`, so a run never stops to ask for approval and can use any tool, including ones that delete files or send messages. Keep each job's prompt narrow, and list any actions it may take that can't be undone. The skill writes prompts this way.
 - **Success:** a run succeeds only when Claude Code exits cleanly and reports no error. For a job with an output file, the runner also checks that the file's modification time moved forward during the run. For jobs with no output file, write the prompt so Claude ends with a line starting `PARTIAL:` if a required step fails. Otherwise, a failed step can look like a successful run. A `PARTIAL:` line always marks the run as failed.
-- **Notifications:** every run that finishes tries to send one, and it stays on screen only when terminal-notifier is set to Alerts (Persistent on macOS 27). Clicking it opens the output on success and the log on failure. A run that starts while the last one is still going is skipped, with no notification.
-- **Looking into a run:** if the runner captures Claude Code's session ID, the run's log ends with a `claude --resume <session>` line.
+- **Notifications:** every run that finishes tries to send one, and it stays on screen only when terminal-notifier is set to Alerts (Persistent on macOS 27). Clicking it opens the output on success and the log on failure. A run that starts while the last one is still going is skipped, with no notification. A job with a `notify` command sends its result through that command instead, and falls back to a notification if the command fails.
+- **Looking into a run:** if the runner captures Claude Code's session ID, the run's log includes a `claude --resume <session>` line.
 - **Sign-ins expire:** an unattended run can't sign in again. If a tool's login expires between runs, the next run of a job that needs that tool fails. Check how long each tool stays signed in.
 - **The job's PATH** is `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`, and no shell profile runs. Jobs can find Homebrew tools on this PATH. In job prompts, use absolute paths for tools in `~/.local/bin` or tools your shell profile adds.
+
+## Send results somewhere else
+
+By default every finished run tries to post a macOS notification. To send the result somewhere else, give the job a `notify` command. `jobs.py` runs it after each finished run in place of the notification, in the job's folder, and passes the run on stdin as JSON. The JSON includes:
+
+- the status (`success`, `failed`, `timeout`, or `stopped`), title, message, and error
+- the output file and log path
+- the last lines of this run's log
+- the agent's final message, and a `claude --resume` line when there is one
+
+The first item must be an absolute path, and a leading `~` in any item is expanded. Skipped runs send nothing.
+
+The repo includes a Postmark sender. On success it emails the job's output file, or the agent's final message when the job has no output file. On any other result it emails the error and the end of the log:
+
+```json
+"notify": {
+  "command": ["/usr/bin/python3", "~/.claude/skills/scheduling-agent-jobs/scripts/notify_postmark.py",
+              "--from", "reports@example.com", "--to", "me@example.com",
+              "--env-file", "~/notes/.env", "--token-var", "POSTMARK_SERVER_TOKEN"]
+}
+```
+
+- Use a Postmark **server** token, and send from an address or domain verified in that Postmark account.
+- Keep the token in a file the job can read, outside `~/Documents`, `~/Desktop`, `~/Downloads`, and iCloud Drive, and out of git. The spec names the file and the variable, never the token.
+- The failure email includes the end of the log, which can show commands the run used and local paths.
+- If the command exits nonzero, runs longer than 60 seconds, or can't start, the log says `notify hook failed (…)` and the run falls back to the macOS notification, with "The notify hook failed; see the log." added. A delivered result logs `notify hook: done`. Keep terminal-notifier installed for that fallback.
+- Older copies of `jobs.py` reject the `notify` field. Remove it from a job before you go back to one.
 
 ## Update
 
