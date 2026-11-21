@@ -4,7 +4,7 @@ This repo holds a macOS launchd scheduler for unattended Claude Code runs (`jobs
 
 ## Before every commit
 
-- Run `/usr/bin/python3 -B skills/scheduling-agent-jobs/tests/test_jobs.py` and `/usr/bin/python3 -B tests/test_install.py`. Delete any `__pycache__` they leave.
+- Run `/usr/bin/python3 -B skills/scheduling-agent-jobs/tests/test_jobs.py`, `/usr/bin/python3 -B skills/scheduling-agent-jobs/tests/test_notify_postmark.py`, and `/usr/bin/python3 -B tests/test_install.py`. Delete any `__pycache__` they leave.
 - Grep for personal references (home paths, usernames, and private project names) and remove them.
 
 ## Rules

@@ -5,7 +5,7 @@ description: Use when the user asks to run a slash command or prompt on a schedu
 
 # Scheduling Agent Jobs
 
-`scripts/jobs.py` schedules unattended Claude Code runs (`claude -p`) through launchd on macOS. The scheduler prevents overlapping runs of the same job, enforces a timeout, and records run history. Each run's stream is written to a readable log, and each completed run tries to send a persistent notification through terminal-notifier; clicking it runs the job's open action. If the notification can't be sent, or terminal-notifier isn't installed, the log says so. The runner doesn't see whether the command a click runs succeeds. A run skipped because the previous one is still going, or because the job is paused, is recorded without a notification. The optional **Schedules** Herdr mod shows every job and has Run now, Pause/Resume, Log, and Open output buttons. It calls `jobs.py` to list, run, pause, and resume jobs, and Herdr handles Log and Open output directly.
+`scripts/jobs.py` schedules unattended Claude Code runs (`claude -p`) through launchd on macOS. The scheduler prevents overlapping runs of the same job, enforces a timeout, and records run history. Each run's stream is written to a readable log, and each completed run tries to send a persistent notification through terminal-notifier; clicking it runs the job's open action. If the notification can't be sent, or terminal-notifier isn't installed, the log says so. A job with a `notify` command sends its result through that command instead, such as an email through the bundled Postmark sender, and falls back to the notification if the command fails. The runner doesn't see whether the command a click runs succeeds. A run skipped because the previous one is still going, or because the job is paused, is recorded without a notification. The optional **Schedules** Herdr mod shows every job and has Run now, Pause/Resume, Log, and Open output buttons. It calls `jobs.py` to list, run, pause, and resume jobs, and Herdr handles Log and Open output directly.
 
 This skill lives in the herdr-scheduled-jobs repo, and the repo's `install.sh` links it into `~/.claude/skills/`. Find the repo with `cd -P "<base directory>/../.." && pwd`. Setup is in the repo's `README.md`. If the user hasn't run the smoke test on this Mac, or isn't sure, run it first. The mod's source is `mods/schedules/` in the repo. After editing it, re-run `install.sh`, which copies it into `~/.config/herdr-app/mods/schedules/` and, when herdr-app is on PATH, runs `herdr-app check`.
 
@@ -76,6 +76,7 @@ The prompt has these parts, in order:
 | `label` | Notification title prefix. Defaults to `name`. |
 | `expectedFile` | A run succeeds only when Claude exits 0, reports no error, **and** this file's modification time moved forward during the run. An agent that stops on an auth error still exits 0. Omit it only when the job writes no file, and then the prompt must end with a `PARTIAL:` line whenever a step it needs fails, or the failure looks like a success. `~` paths are expanded. |
 | `open` | What clicking the notification does on success: a command as a list of strings with an absolute path, a URL, or a file path (opened with `open -t`). Without it, the click shows `expectedFile`, and with neither set, it opens the log. Failures always open the log. |
+| `notify` | Optional. `{"command": [...]}`: a command `jobs.py` runs after each finished run instead of the macOS notification, with the run as JSON on stdin. The first item is an absolute path, and `~` expands. `scripts/notify_postmark.py` emails the output, or the error and log tail, through Postmark; see the README. Never put a secret in the spec: the Postmark sender takes `--env-file` and `--token-var`. If the command fails, the run falls back to the notification. |
 | `countRegex` / `countNoun` | Optional. The first number matched in `expectedFile` goes in the success message. |
 | `model` | Optional `--model` value. Without it, Claude Code's default applies. |
 | `claudePath` | Filled in by `add` from where Claude Code is installed. Set it only to pin a different binary. |
@@ -102,19 +103,24 @@ The click runs with a minimal PATH, so use absolute paths.
 ## 4. Test with a fake run
 
 1. Run `/usr/bin/python3 -B "<base directory>/tests/test_jobs.py"` and require every test to pass. The suite covers cron parsing, plists, success, an untouched file, nonzero exits, agent errors, timeouts, overlapping runs, relinking, and the smoke test.
-2. Run the job against fakes. Nothing real runs and no notification appears:
+2. Run the job against fakes. Nothing real runs, and no notification or message goes out:
 
    ```bash
    T=$(mktemp -d); printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>%s/n; echo @CLOSED\n' $T >$T/notifier
-   printf '#!/bin/bash\nexit 0\n' >$T/claude; chmod +x $T/notifier $T/claude
-   CLAUDE_BIN=$T/claude NOTIFIER_BIN=$T/notifier /usr/bin/python3 "$J" exec morning-report --manual; echo exit=$?; sleep 1; cat $T/n
+   printf '#!/bin/bash\nexit 0\n' >$T/claude; printf '#!/bin/bash\ncat >%s/payload.json\n' $T >$T/hook
+   chmod +x $T/notifier $T/claude $T/hook
+   NOTIFY_HOOK_BIN=$T/hook CLAUDE_BIN=$T/claude NOTIFIER_BIN=$T/notifier /usr/bin/python3 "$J" exec morning-report --manual; echo exit=$?; sleep 1; cat $T/n $T/payload.json 2>/dev/null
    ```
 
-   With `expectedFile` set, expect `exit=1` and a `<label> failed … not updated` line, because the fake wrote nothing. Without it, expect `exit=0` and a `<label> done` line (`<label> ready` if the job sets `open`). `--manual` runs the job even though it's paused. This adds one entry to the job's run history.
+   With `expectedFile` set, expect `exit=1`, because the fake wrote nothing. Without it, expect `exit=0`.
+   - For a job without `notify`, the notifier line is `<label> failed … not updated` with `expectedFile`, and `<label> done` without it (`<label> ready` if the job sets `open`).
+   - For a job with `notify`, there's no notifier line. Instead, `payload.json` has `"status": "failed"` with `not updated` in `error`, or `"status": "success"`, and the log ends with `notify hook: done`.
+
+   `--manual` runs the job even though it's paused. This adds one entry to the job's run history.
 
 ## 5. Real run
 
-Offer the user a real run, naming its one-way effects (for example, a job that marks mail as read can't undo it) and that saying yes also turns the schedule on. On a yes, run `resume <slug>` and require it to succeed. Then run `run <slug>`: once the job is loaded, `run` goes through launchd, so it gets the same environment as a scheduled run. Wait until `list --json` shows a new `lastRun` with `source` `manual` before you judge the run. Then check that record, the log, and that the notification appeared. If the run fails, `pause <slug>` again and report the error. If the user declines the real run, ask whether to resume the schedule anyway, and leave it paused unless the user says yes.
+Offer the user a real run, naming its one-way effects (for example, a job that marks mail as read can't undo it, and a `notify` command sends a message to its recipients) and that saying yes also turns the schedule on. On a yes, run `resume <slug>` and require it to succeed. Then run `run <slug>`: once the job is loaded, `run` goes through launchd, so it gets the same environment as a scheduled run. Wait until `list --json` shows a new `lastRun` with `source` `manual` before you judge the run. Then check that record and the log. For a job without `notify`, check that the notification appeared. For a job with `notify`, wait until `list --json` shows `running` false, find `notify hook: done` after that run's `##### Started … · run <runId> #####` line, and check that the message arrived. `notify hook failed` means the hook didn't confirm delivery and the runner tried a notification instead. If the run fails, `pause <slug>` again and report the error. If the user declines the real run, ask whether to resume the schedule anyway, and leave it paused unless the user says yes.
 
 ## 6. Report
 
