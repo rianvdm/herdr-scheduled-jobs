@@ -145,6 +145,16 @@ class Sender(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("can't read", r.stderr)
 
+    def test_non_utf8_env_file_gives_one_line(self):
+        self.env_file = os.path.join(self.tmp, "binary.env")
+        with open(self.env_file, "wb") as f:
+            f.write(b"POSTMARK_TOKEN=\xff\xfe\n")
+        r = self.run_sender(self.success())
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("can't read", r.stderr)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertEqual(FakePostmark.received, [])
+
     def test_unreadable_output_file_sends_nothing(self):
         r = self.run_sender(self.success(expectedFile=os.path.join(self.tmp, "gone.md")))
         self.assertEqual(r.returncode, 1)

@@ -64,7 +64,7 @@ def find_token(env_file, var):
     if env_file:
         try:
             value = read_env_file(env_file).get(var)
-        except OSError:
+        except (OSError, ValueError):
             fail(f"can't read {env_file}")
         where = env_file
     else:
