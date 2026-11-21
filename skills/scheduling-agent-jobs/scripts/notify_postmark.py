@@ -14,6 +14,7 @@ The token is a Postmark server token, read from --env-file (or from the environm
 file is given). It is never printed.
 """
 import argparse
+import html
 import json
 import os
 import http.client
@@ -28,6 +29,120 @@ LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 SUBJECT_MAX = 200
 BODY_MAX = 1_000_000
 REPLY_MAX = 65536
+
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
+BULLET = re.compile(r"^( *)[-*]\s+(.*)$")
+RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+CODE_SPAN = re.compile(r"`([^`\n]+)`")
+LINK = re.compile(r"\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)")
+BOLD = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
+STAR_EM = re.compile(r"\*(?!\s)(.+?)(?<!\s)\*")
+UNDERSCORE_EM = re.compile(r"(?<![A-Za-z0-9_])_(?!\s)(.+?)(?<!\s)_(?![A-Za-z0-9_])")
+SAFE_URL = re.compile(r"^(https?://|mailto:)", re.I)
+HOLE = re.compile("\x00(\\d+)\x00")
+
+FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+MONO = "SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
+HEADING_STYLE = {1: "font-size:24px;margin:24px 0 12px", 2: "font-size:20px;margin:22px 0 10px",
+                 3: "font-size:17px;margin:18px 0 8px", 4: "font-size:15px;margin:16px 0 6px",
+                 5: "font-size:14px;margin:14px 0 6px", 6: "font-size:13px;margin:14px 0 6px"}
+CODE_STYLE = f"font-family:{MONO};font-size:13px;background:#f3f4f6;padding:1px 4px;border-radius:3px"
+PRE_STYLE = (f"font-family:{MONO};font-size:13px;background:#f3f4f6;padding:10px 12px;"
+             "border-radius:4px;overflow-x:auto;margin:12px 0")
+
+
+def inline_html(text):
+    """Escape one line of Markdown text, then add code, links, bold, and italics."""
+    holes = []
+
+    def hide(markup):
+        holes.append(markup)
+        return f"\x00{len(holes) - 1}\x00"
+
+    def emphasis(t):
+        t = BOLD.sub(r"<strong>\1</strong>", t)
+        t = STAR_EM.sub(r"<em>\1</em>", t)
+        return UNDERSCORE_EM.sub(r"<em>\1</em>", t)
+
+    def link(m):
+        label, url = m.group(1), m.group(2)
+        if not SAFE_URL.match(html.unescape(url)):
+            return f"{emphasis(label)} ({url})"
+        return hide(f'<a href="{url}" style="color:#1a56db">{emphasis(label)}</a>')
+
+    t = html.escape(text.replace("\x00", ""), quote=True)
+    t = CODE_SPAN.sub(lambda m: hide(f'<code style="{CODE_STYLE}">{m.group(1)}</code>'), t)
+    t = emphasis(LINK.sub(link, t))
+    while HOLE.search(t):  # links can hold code spans, so unwrap until none are left
+        t = HOLE.sub(lambda m: holes[int(m.group(1))], t)
+    return t
+
+
+def list_html(items):
+    """items are (level, text); level 1 nests one <ul> under the item before it."""
+    out, open_li, nested = ['<ul style="margin:8px 0;padding-left:24px">'], False, False
+    for level, text in items:
+        if level == 0:
+            out.append("</ul></li>" if nested else "</li>" if open_li else "")
+            nested = False
+            out.append(f'<li style="margin:4px 0">{inline_html(text)}')
+            open_li = True
+        else:
+            if not nested:
+                if not open_li:
+                    out.append('<li style="margin:4px 0">')
+                    open_li = True
+                out.append('<ul style="margin:4px 0;padding-left:24px">')
+                nested = True
+            out.append(f'<li style="margin:4px 0">{inline_html(text)}</li>')
+    out.append("</ul></li>" if nested else "</li>" if open_li else "")
+    out.append("</ul>")
+    return "".join(out)
+
+
+def markdown_to_html(text):
+    """A small Markdown subset (headings, bullets, code, rules, emphasis, links) as an HTML page.
+
+    Everything is escaped first, so the report can't add markup. Unknown syntax stays text."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+        elif line.lstrip().startswith("```"):
+            code, i = [], i + 1
+            while i < len(lines) and not lines[i].lstrip().startswith("```"):
+                code.append(lines[i])
+                i += 1
+            i += 1  # the closing fence, if there is one
+            blocks.append(f'<pre style="{PRE_STYLE}"><code>{html.escape(chr(10).join(code))}</code></pre>')
+        elif RULE.match(line):
+            blocks.append('<hr style="border:0;border-top:1px solid #d1d5db;margin:20px 0">')
+            i += 1
+        elif HEADING.match(line):
+            level, body = HEADING.match(line).groups()
+            n = len(level)
+            blocks.append(f'<h{n} style="{HEADING_STYLE[n]};line-height:1.3">{inline_html(body)}</h{n}>')
+            i += 1
+        elif BULLET.match(line):
+            items = []
+            while i < len(lines) and BULLET.match(lines[i]) and not RULE.match(lines[i]):
+                indent, body = BULLET.match(lines[i]).groups()
+                items.append((1 if len(indent) >= 2 else 0, body))
+                i += 1
+            blocks.append(list_html(items))
+        else:
+            para = []
+            while (i < len(lines) and lines[i].strip() and not lines[i].lstrip().startswith("```")
+                   and not RULE.match(lines[i]) and not HEADING.match(lines[i]) and not BULLET.match(lines[i])):
+                para.append(lines[i].strip())
+                i += 1
+            blocks.append(f'<p style="margin:10px 0">{inline_html(" ".join(para))}</p>')
+    return ('<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+            f'<body style="margin:0;padding:16px;background:#ffffff">'
+            f'<div style="font-family:{FONT};font-size:15px;line-height:1.5;color:#111827;max-width:680px">'
+            + "\n".join(blocks) + "</div></body></html>")
 
 
 def fail(message, token=None):
@@ -89,6 +204,12 @@ def api_url():
 def subject(run):
     text = f'{run.get("title") or "Scheduled job"}: {run.get("message") or ""}'
     return " ".join(text.split())[:SUBJECT_MAX].rstrip(": ")
+
+
+def markdown_report(run):
+    """True when the email body comes from a Markdown output file."""
+    out = run.get("expectedFile")
+    return run.get("status") == "success" and bool(out) and str(out).lower().endswith(".md")
 
 
 def text_body(run):
@@ -160,6 +281,8 @@ def main():
         fail("unsupported payload version")
     message = {"From": args.sender, "To": ", ".join(args.to), "Subject": subject(run),
                "TextBody": text_body(run), "MessageStream": args.message_stream}
+    if markdown_report(run):
+        message["HtmlBody"] = markdown_to_html(message["TextBody"])
     if run.get("slug"):
         message["Tag"] = run["slug"]
     send(find_token(args.env_file, args.token_var), message)

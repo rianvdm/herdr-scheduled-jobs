@@ -15,6 +15,10 @@ import unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 SENDER = os.path.join(HERE, "..", "scripts", "notify_postmark.py")
 TOKEN = "dummy-token-5f1c"
+REPORT = (
+    "# X mentions\n\n*Run: 2026-11-21 07:05 PT \u00b7 3 new posts*\n\n"
+    '- **@someone** (external), 2026-11-21: Text with "quotes" and a colon. [Post](https://x.com/someone/status/1)\n\n'
+    "## Dropped\n\n- @other, 2026-11-21: link-only post. [Post](https://x.com/other/status/2)\n")
 OK = (200, {"ErrorCode": 0, "Message": "OK", "MessageID": "msg-1"}, {})
 
 
@@ -225,6 +229,113 @@ class Sender(unittest.TestCase):
             f.write("# c\n\nA=bare # note\nexport B='single # kept' # note\nC=\"double\"\nD=x\nD=y\nE=a#b\n")
         self.assertEqual(load_sender().read_env_file(p),
                          {"A": "bare", "B": "single # kept", "C": "double", "D": "y", "E": "a#b"})
+
+    def html(self, md):
+        return load_sender().markdown_to_html(md)
+
+    def test_html_report_shape(self):
+        out = self.html(REPORT)
+        self.assertIn("<h1", out)
+        self.assertIn("X mentions</h1>", out)
+        self.assertIn("<h2", out)
+        self.assertIn("Dropped</h2>", out)
+        self.assertIn("<em>Run: 2026-11-21 07:05 PT \u00b7 3 new posts</em>", out)
+        self.assertIn("<strong>@someone</strong>", out)
+        self.assertIn('<a href="https://x.com/someone/status/1"', out)
+        self.assertIn("&quot;quotes&quot;", out)
+        self.assertEqual(out.count("<ul"), 2)
+        self.assertEqual(out.count("<li"), 2)
+        self.assertNotIn("http-equiv", out)
+        self.assertNotIn("<style", out)
+
+    def test_html_nested_bullets(self):
+        out = self.html("- one\n  - two\n  - three\n- four\n")
+        self.assertEqual(out.count("<ul"), 2)
+        self.assertEqual(out.count("<li"), 4)
+        self.assertLess(out.index("one"), out.index("two"))
+        self.assertLess(out.index("three"), out.index("four"))
+        self.assertIn("</ul></li>", out)
+
+    def test_html_inline_code_protects_contents(self):
+        out = self.html("Use `**not bold**` and `a_b_c` here")
+        self.assertIn("**not bold**</code>", out)
+        self.assertNotIn("<strong", out)
+        self.assertNotIn("<em", out)
+
+    def test_html_escapes_markup(self):
+        out = self.html("<script>alert(1)</script>\n\n- <b>x</b>\n\n```\n<i>y</i>\n```\n")
+        for tag in ("<script", "<b>", "<i>"):
+            self.assertNotIn(tag, out)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", out)
+
+    def test_html_only_safe_link_schemes(self):
+        out = self.html("[x](javascript:alert(1)) [y](JavaScript:alert(2)) [z](data:text/html,hi)")
+        self.assertNotIn("<a", out)
+        self.assertIn("x", out)
+        self.assertIn("javascript:alert(1)", out)
+        out = self.html("[a](https://example.com/a?b=1&c=2) [m](mailto:me@example.com) [h](http://example.com)")
+        self.assertEqual(out.count("<a "), 3)
+        self.assertIn('href="https://example.com/a?b=1&amp;c=2"', out)
+        self.assertNotIn('"onmouseover', self.html('[q](https://example.com/"onmouseover=x)'))
+
+    def test_html_keeps_snake_case(self):
+        out = self.html("see snake_case_name and _real_ emphasis")
+        self.assertIn("snake_case_name", out)
+        self.assertIn("<em>real</em>", out)
+
+    def test_html_fenced_code_block(self):
+        out = self.html("before\n\n```python\nx = **1**\n\n  y = <2>\n```\n\nafter\n")
+        self.assertIn("<pre", out)
+        self.assertIn("x = **1**\n\n  y = &lt;2&gt;", out)
+        self.assertNotIn("<strong", out)
+        self.assertIn("after", out)
+
+    def test_html_unclosed_fence_does_not_fail(self):
+        out = self.html("```\nabc\n")
+        self.assertIn("abc", out)
+
+    def test_html_horizontal_rules(self):
+        for rule in ("---", "***", "___"):
+            self.assertIn("<hr", self.html(f"a\n\n{rule}\n\nb"), rule)
+
+    def test_html_multi_line_paragraph(self):
+        out = self.html("first line\nsecond line\n\nnext\n")
+        self.assertIn("first line second line</p>", out)
+        self.assertEqual(out.count("<p"), 2)
+
+    def test_html_truncated_body_renders(self):
+        out = self.html("# T\n\n- a\n\n[truncated]\n")
+        self.assertIn("[truncated]", out)
+
+    def test_markdown_output_file_also_sends_html(self):
+        with open(self.out, "w") as f:
+            f.write(REPORT)
+        self.assertEqual(self.run_sender(self.success()).returncode, 0)
+        body = FakePostmark.received[0][1]
+        self.assertEqual(body["TextBody"], REPORT)
+        self.assertIn("<h1", body["HtmlBody"])
+
+    def test_markdown_extension_is_case_insensitive(self):
+        out = os.path.join(self.tmp, "REPORT.MD")
+        with open(out, "w") as f:
+            f.write("# Loud\n")
+        self.assertEqual(self.run_sender(self.success(expectedFile=out)).returncode, 0)
+        self.assertIn("<h1", FakePostmark.received[0][1]["HtmlBody"])
+
+    def test_non_markdown_output_file_is_text_only(self):
+        out = os.path.join(self.tmp, "report.txt")
+        with open(out, "w") as f:
+            f.write("# Not markdown\n")
+        self.assertEqual(self.run_sender(self.success(expectedFile=out)).returncode, 0)
+        self.assertNotIn("HtmlBody", FakePostmark.received[0][1])
+
+    def test_failure_is_text_only(self):
+        self.assertEqual(self.run_sender(self.success(status="failed", error="boom")).returncode, 0)
+        self.assertNotIn("HtmlBody", FakePostmark.received[0][1])
+
+    def test_success_without_output_file_is_text_only(self):
+        self.assertEqual(self.run_sender(self.success(expectedFile=None, resultText="# Hi")).returncode, 0)
+        self.assertNotIn("HtmlBody", FakePostmark.received[0][1])
 
 
 if __name__ == "__main__":

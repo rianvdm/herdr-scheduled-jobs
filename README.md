@@ -144,7 +144,7 @@ By default every finished run tries to post a macOS notification. To send the re
 
 The command's first item must be an absolute path, and a leading `~` in any of its items is expanded. Skipped runs send nothing.
 
-The repo includes a Postmark sender. On success it emails the job's output file, or the agent's final message when the job has no output file. On any other result it emails the error and the end of the log:
+The repo includes a Postmark sender. On success it emails the job's output file, or the agent's final message when the job has no output file. When the output file is Markdown (`.md`), the email also carries an HTML version rendered from it, and mail clients show that one. On any other result it emails the error and the end of the log:
 
 ```json
 "notify": {
