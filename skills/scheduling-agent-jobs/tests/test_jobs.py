@@ -83,6 +83,38 @@ class Cron(unittest.TestCase):
         self.assertEqual(jobs.describe("*/15 * * * *"), "*/15 * * * *")
 
 
+class Outcome(unittest.TestCase):
+    def job(self, **over):
+        j = {"name": "Triage", "slug": "triage", "countRegex": r"[0-9]+ items?", "countNoun": "items"}
+        j.update(over)
+        return j
+
+    def test_texts(self):
+        log = jobs.open_action(jobs.path("log", "triage"))
+        self.assertEqual(jobs.run_outcome(self.job(), "failed", "exit code 3", None),
+                         {"title": "Triage failed", "message": "Exit code 3.", "action": log,
+                          "hint": "Click to see the log."})
+        self.assertEqual(jobs.run_outcome(self.job(), "timeout", "Timed out after 1s", None)["title"],
+                         "Triage timed out")
+        self.assertEqual(jobs.run_outcome(self.job(), "stopped", "Stopped", None)["message"],
+                         "The run was stopped.")
+        self.assertEqual(jobs.run_outcome(self.job(countRegex=None), "success", None, None),
+                         {"title": "Triage done", "message": "Finished.", "action": log,
+                          "hint": "Click to see the log."})
+
+    def test_count_and_open_target(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+            f.write("**4 items** today\n")
+        self.addCleanup(os.remove, f.name)
+        o = jobs.run_outcome(self.job(), "success", None, f.name)
+        self.assertEqual((o["title"], o["message"], o["hint"]), ("Triage ready", "4 items.", "Click to open it."))
+        self.assertEqual(o["action"], ["/usr/bin/open", "-t", f.name])
+
+    def test_unreadable_count_file_falls_back(self):
+        o = jobs.run_outcome(self.job(), "success", None, "/no/such/report.md")
+        self.assertEqual((o["title"], o["message"]), ("Triage ready", "Finished."))
+
+
 class Exec(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

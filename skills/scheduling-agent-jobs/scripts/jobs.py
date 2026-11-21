@@ -729,6 +729,40 @@ def notify(title, message, group, action, log=None):
         log.write(f"terminal-notifier failed ({failure})")
 
 
+def run_outcome(job, status, error, expected):
+    """What a finished run reports: a title, a message without the click hint, the click
+    action, and the hint terminal-notifier adds."""
+    label = job.get("label", job["name"])
+    show_log = open_action(path("log", job["slug"]))
+    if status in ("timeout", "stopped"):
+        return {"title": f"{label} {'timed out' if status == 'timeout' else 'stopped'}",
+                "message": "The run was stopped.", "action": show_log, "hint": "Click to see the log."}
+    if status == "failed":
+        return {"title": f"{label} failed", "message": f"{error[0].upper()}{error[1:]}.",
+                "action": show_log, "hint": "Click to see the log."}
+    message = "Finished."
+    if job.get("countRegex") and expected:
+        try:
+            with open(expected, errors="replace") as f:
+                m = re.search(job["countRegex"], f.read())
+        except OSError:
+            m = None
+        n = re.search(r"\d+", m.group(0)) if m else None
+        if n:
+            message = f'{n.group(0)} {job.get("countNoun", "items")}.'
+    target = job.get("open") or expected
+    if target:
+        return {"title": f"{label} ready", "message": message, "action": open_action(target),
+                "hint": "Click to open it."}
+    return {"title": f"{label} done", "message": message, "action": show_log, "hint": "Click to see the log."}
+
+
+def deliver(job, outcome, payload, tx):
+    """Tell the user how the run went."""
+    notify(outcome["title"], f'{outcome["message"]} {outcome["hint"]}', "scheduled-" + job["slug"],
+           outcome["action"], tx)
+
+
 def record(slug, entry):
     with open(path("runs", slug), "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -874,27 +908,8 @@ def cmd_exec(args):
     if tx.session_id:
         tx.write(runner.resume_hint(job["workdir"], tx.session_id))
 
-    label = job.get("label", job["name"])
-    group = "scheduled-" + slug
-    show_log = open_action(path("log", slug))
-    if status in ("timeout", "stopped"):
-        notify(f"{label} {'timed out' if status == 'timeout' else 'stopped'}",
-               "The run was stopped. Click to see the log.", group, show_log, tx)
-    elif status == "failed":
-        notify(f"{label} failed", f"{error[0].upper()}{error[1:]}. Click to see the log.", group, show_log, tx)
-    else:
-        message = "Finished."
-        if job.get("countRegex") and expected:
-            with open(expected, errors="replace") as f:
-                m = re.search(job["countRegex"], f.read())
-            n = re.search(r"\d+", m.group(0)) if m else None
-            if n:
-                message = f'{n.group(0)} {job.get("countNoun", "items")}.'
-        target = job.get("open") or expected
-        if target:
-            notify(f"{label} ready", f"{message} Click to open it.", group, open_action(target), tx)
-        else:
-            notify(f"{label} done", f"{message} Click to see the log.", group, show_log, tx)
+    outcome = run_outcome(job, status, error, expected)
+    deliver(job, outcome, None, tx)
     return code
 
 
