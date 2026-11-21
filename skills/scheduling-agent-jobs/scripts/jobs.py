@@ -817,6 +817,7 @@ def run_hook(job, payload, tx):
     override = os.environ.get("NOTIFY_HOOK_BIN")  # tests and the skill's fake run
     command = [override] if override is not None else job["notify"]["command"]  # "" fails to start
     timeout = hook_timeout()
+    data = json.dumps(payload).encode("utf-8")
     try:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=tx.log, stderr=tx.log,
                                 cwd=job["workdir"], env=child_env(), start_new_session=True)
@@ -824,7 +825,7 @@ def run_hook(job, payload, tx):
         failure = f"could not start: {type(e).__name__}"
     else:
         try:
-            proc.communicate(json.dumps(payload).encode("utf-8"), timeout=timeout)
+            proc.communicate(data, timeout=timeout)
             failure = f"exit {proc.returncode}" if proc.returncode != 0 else None
         except subprocess.TimeoutExpired:
             try:

@@ -133,6 +133,14 @@ class Sender(unittest.TestCase):
         r = self.run_sender(self.success(), env_file=False, token_env=TOKEN)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_env_file_is_the_only_source_when_given(self):
+        with open(self.env_file, "w") as f:
+            f.write("OTHER=1\n")
+        r = self.run_sender(self.success(), token_env=TOKEN)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("POSTMARK_TOKEN isn't set", r.stderr)
+        self.assertEqual(FakePostmark.received, [])
+
     def test_missing_variable(self):
         r = self.run_sender(self.success(), "--token-var", "NOPE")
         self.assertEqual(r.returncode, 1)
