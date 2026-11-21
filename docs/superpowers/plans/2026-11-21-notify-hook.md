@@ -282,7 +282,7 @@ git commit -m "Validate the notify spec field"
 - Consumes: `run_outcome()` and `deliver(job, outcome, payload, tx)` from Task 1, `job["notify"]["command"]` from Task 2, and the `FAKE_HOOK`, `self.hook`, and `self.payload_path` fixtures from Task 2.
 - Produces:
   - `run_tail(log_path: str, run_id: str) -> str`.
-  - `build_payload(job, entry, outcome, tx, resume) -> dict`, payload version 1 as the spec defines it. Task 4 reads this.
+  - `build_payload(job, entry, outcome, tx, resume, expected) -> dict`, payload version 1 as the spec defines it. Task 4 reads this.
   - `run_hook(job, payload, tx) -> bool`.
 
 - [ ] **Step 1: Write the failing unit tests for the tail.** Add this class to `TEST_JOBS`, after `class Outcome`:
@@ -308,6 +308,11 @@ class Tail(unittest.TestCase):
         tail = jobs.run_tail(p, "r1").splitlines()
         self.assertEqual((len(tail), tail[-1]), (50, "line 79"))
         self.assertEqual(jobs.run_tail(p, "nope"), "")
+
+    def test_needs_the_started_banner(self):
+        p = self.write_log(["##### Started a · manual · run r1 #####", "one", "echo · run r1 #####", "two"])
+        self.assertEqual(jobs.run_tail(p, "r1"),
+                         "##### Started a · manual · run r1 #####\none\necho · run r1 #####\ntwo")
 ```
 
 - [ ] **Step 2: Write the failing hook tests.** Add these to `class Exec`:
@@ -382,6 +387,25 @@ class Tail(unittest.TestCase):
         self.assertEqual(self.payload()["status"], "success")
         self.assertIn("notify hook: done", self.log())
 
+    def test_empty_hook_bin_does_not_fall_through(self):
+        self.add(notify={"command": [self.hook]})
+        self.env["NOTIFY_HOOK_BIN"] = ""
+        self.jobs("exec", "triage")
+        self.assertFalse(os.path.exists(self.payload_path))
+        self.assertIn(self.FALLBACK, self.notification())
+
+    def test_relative_expected_file_resolves_against_workdir(self):
+        self.add(notify={"command": [self.hook]}, expectedFile="out.md")
+        r = self.jobs("exec", "triage")  # runs from the test's folder, not the job's
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.payload()["expectedFile"], self.out)
+
+    def test_bad_hook_timeout_is_ignored(self):
+        self.env["SCHEDULED_JOBS_HOOK_TIMEOUT"] = "soon"
+        self.add(notify={"command": [self.hook]})
+        self.jobs("exec", "triage")
+        self.assertIn("notify hook: done", self.log())
+
     def test_skipped_runs_do_not_call_hook(self):
         self.add(notify={"command": [self.hook]}, paused=True)
         self.jobs("exec", "triage")
@@ -407,7 +431,7 @@ Expected:
 - [ ] **Step 4: Add the constants** in `JOBS_PY`, directly under `KILL_GRACE_SECONDS = 10`:
 
 ```python
-HOOK_TIMEOUT_SECONDS = int(os.environ.get("SCHEDULED_JOBS_HOOK_TIMEOUT", "60"))  # tests shorten it
+HOOK_TIMEOUT_DEFAULT = 60
 LOG_TAIL_LINES = 50
 TEXT_CAP_CHARS = 16384
 ```
@@ -424,34 +448,45 @@ def run_tail(log_path, run_id):
             lines = f.read().splitlines()
     except OSError:
         return ""
-    starts = [i for i, line in enumerate(lines) if line.endswith(marker)]
+    starts = [i for i, line in enumerate(lines) if line.startswith("##### Started") and line.endswith(marker)]
     if not starts:
         return ""
     mine = [line for line in lines[starts[-1]:] if not line.startswith("##### Skipped")]
     return "\n".join(mine[-LOG_TAIL_LINES:])[-TEXT_CAP_CHARS:]
 
 
-def build_payload(job, entry, outcome, tx, resume):
-    """Version 1 of what a notify hook gets on stdin."""
-    expected = job.get("expectedFile")
-    if expected and not os.path.isabs(expected):
-        expected = os.path.join(job["workdir"], expected)
+def cap(text):
+    return text[:TEXT_CAP_CHARS] if isinstance(text, str) else None
+
+
+def build_payload(job, entry, outcome, tx, resume, expected):
+    """Version 1 of what a notify hook gets on stdin. `expected` is the absolute path cmd_exec checked."""
     result_text = (tx.result or {}).get("result")
     return {"version": 1, "slug": job["slug"], "name": job["name"], "label": job.get("label", job["name"]),
             "runId": entry["runId"], "source": entry["source"], "status": entry["status"],
-            "title": outcome["title"], "message": outcome["message"], "error": entry["error"],
+            "title": outcome["title"], "message": cap(outcome["message"]), "error": cap(entry["error"]),
             "exitCode": entry["exitCode"], "startedAt": entry["startedAt"], "finishedAt": entry["finishedAt"],
             "durationMs": entry["durationMs"], "expectedFile": expected, "logPath": path("log", job["slug"]),
             "logTail": run_tail(path("log", job["slug"]), entry["runId"]), "sessionId": entry["sessionId"],
             "resumeHint": resume,
-            "resultText": result_text[:TEXT_CAP_CHARS] if isinstance(result_text, str) else None}
+            "resultText": cap(result_text)}
+
+
+def hook_timeout():
+    """SCHEDULED_JOBS_HOOK_TIMEOUT (tests) when it is a positive integer, else the default."""
+    try:
+        value = int(os.environ.get("SCHEDULED_JOBS_HOOK_TIMEOUT", ""))
+    except ValueError:
+        return HOOK_TIMEOUT_DEFAULT
+    return value if value > 0 else HOOK_TIMEOUT_DEFAULT
 
 
 def run_hook(job, payload, tx):
     """Run the job's notify command with the payload on stdin. Returns True when it exited 0.
     Log lines name a fixed reason, never the command line."""
     override = os.environ.get("NOTIFY_HOOK_BIN")  # tests and the skill's fake run
-    command = [override] if override else job["notify"]["command"]
+    command = [override] if override is not None else job["notify"]["command"]  # "" fails to start
+    timeout = hook_timeout()
     try:
         proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=tx.log, stderr=tx.log,
                                 cwd=job["workdir"], env=child_env(), start_new_session=True)
@@ -459,7 +494,7 @@ def run_hook(job, payload, tx):
         failure = f"could not start: {type(e).__name__}"
     else:
         try:
-            proc.communicate(json.dumps(payload).encode("utf-8"), timeout=HOOK_TIMEOUT_SECONDS)
+            proc.communicate(json.dumps(payload).encode("utf-8"), timeout=timeout)
             failure = f"exit {proc.returncode}" if proc.returncode != 0 else None
         except subprocess.TimeoutExpired:
             try:
@@ -467,7 +502,7 @@ def run_hook(job, payload, tx):
             except ProcessLookupError:
                 pass
             proc.wait()
-            failure = f"timed out after {HOOK_TIMEOUT_SECONDS}s"
+            failure = f"timed out after {timeout}s"
     tx.write(f"notify hook failed ({failure})" if failure else "notify hook: done")
     return failure is None
 
@@ -484,7 +519,23 @@ def deliver(job, outcome, payload, tx):
            outcome["action"], tx)
 ```
 
-- [ ] **Step 6: Wire it into `cmd_exec()`.** Replace this block, which runs from `record(slug, {"runId": run_id, "slug": slug, "source": source, ...` through the `tx.write(runner.resume_hint(...))` line:
+- [ ] **Step 6: Wire it into `cmd_exec()`.** First, resolve a relative output path once, so the freshness check, the count, and the payload all use the same file. Replace:
+
+```python
+    expected = job.get("expectedFile")
+    before = mtime(expected) if expected else 0.0
+```
+
+with:
+
+```python
+    expected = job.get("expectedFile")
+    if expected and not os.path.isabs(expected):
+        expected = os.path.abspath(os.path.join(job["workdir"], expected))
+    before = mtime(expected) if expected else 0.0
+```
+
+Then replace this block, which runs from `record(slug, {"runId": run_id, "slug": slug, "source": source, ...` through the `tx.write(runner.resume_hint(...))` line:
 
 ```python
     record(slug, {"runId": run_id, "slug": slug, "source": source, "status": status, "exitCode": code,
@@ -527,7 +578,7 @@ with:
     payload = None
     if job.get("notify"):
         try:
-            payload = build_payload(job, entry, outcome, tx, resume)
+            payload = build_payload(job, entry, outcome, tx, resume, expected)
         except Exception as e:  # a payload bug must not cost the user the result
             tx.write(f"notify hook failed (payload: {type(e).__name__})")
     deliver(job, outcome, payload, tx)
@@ -559,7 +610,7 @@ git commit -m "Run a job's notify hook after each run, falling back to terminal-
 - Produces: a CLI with `--from ADDR`, `--to ADDR` (repeatable), `--token-var NAME` (all three required), `--env-file PATH`, and `--message-stream NAME` (default `outbound`).
   - It exits 0 with `notify_postmark: sent` when Postmark accepts the message.
   - It exits 1 with one `notify_postmark: …` line on stderr otherwise.
-  - The `POSTMARK_API_URL` env var overrides the endpoint for tests.
+  - The `POSTMARK_API_URL` env var overrides the endpoint for tests, and only a local `http://127.0.0.1` or `http://localhost` URL is accepted.
   - It also produces `read_env_file(path) -> dict`.
 
 - [ ] **Step 1: Write the failing tests** in `skills/scheduling-agent-jobs/tests/test_notify_postmark.py`:
@@ -611,7 +662,8 @@ class FakePostmark(http.server.BaseHTTPRequestHandler):
         for k, v in headers.items():
             self.send_header(k, v)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
+        if "Content-Length" not in headers:
+            self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
@@ -644,12 +696,12 @@ class Sender(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def run_sender(self, payload, *extra, env_file=True, raw=None, token_env=None):
+    def run_sender(self, payload, *extra, env_file=True, raw=None, token_env=None, api_url=None):
         args = ["/usr/bin/python3", SENDER, "--from", "jobs@example.com", "--to", "me@example.com",
                 "--token-var", "POSTMARK_TOKEN", *extra]
         if env_file:
             args += ["--env-file", self.env_file]
-        env = dict(os.environ, POSTMARK_API_URL=self.url, no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
+        env = dict(os.environ, POSTMARK_API_URL=api_url or self.url, no_proxy="127.0.0.1", NO_PROXY="127.0.0.1")
         env.pop("POSTMARK_TOKEN", None)
         if token_env:
             env["POSTMARK_TOKEN"] = token_env
@@ -742,10 +794,29 @@ class Sender(unittest.TestCase):
             self.assertEqual(self.run_sender(self.success()).returncode, 1, reply)
 
     def test_bad_payloads(self):
-        for raw in ("not json", "[1]", json.dumps(self.success(version=2))):
+        for raw in ("not json", "[1]", json.dumps(self.success(version=2)), json.dumps(self.success(version=True))):
             r = self.run_sender(None, raw=raw)
             self.assertEqual(r.returncode, 1, raw)
             self.assertIn("payload", r.stderr, raw)
+        self.assertEqual(FakePostmark.received, [])
+
+    def test_token_with_a_newline_is_refused_without_leaking(self):
+        r = self.run_sender(self.success(), env_file=False, token_env=TOKEN + "\nX-Other: 1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("has spaces or control characters", r.stderr)
+        self.assertEqual(FakePostmark.received, [])
+
+    def test_truncated_error_reply_gives_one_line(self):
+        FakePostmark.reply = (422, {"ErrorCode": 300, "Message": "x"}, {"Content-Length": "5000"})
+        r = self.run_sender(self.success())
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(len(r.stderr.strip().splitlines()), 1, r.stderr)
+        self.assertTrue(r.stderr.startswith("notify_postmark: "), r.stderr)
+
+    def test_api_url_override_must_be_local(self):
+        r = self.run_sender(self.success(), api_url="https://elsewhere.example/email")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("may only point at a local test server", r.stderr)
         self.assertEqual(FakePostmark.received, [])
 
     def test_env_file_forms(self):
@@ -786,12 +857,14 @@ file is given). It is never printed.
 import argparse
 import json
 import os
+import http.client
 import re
 import sys
 import urllib.error
 import urllib.request
 
-API_URL = os.environ.get("POSTMARK_API_URL", "https://api.postmarkapp.com/email")  # tests point it at a fake
+API_URL = "https://api.postmarkapp.com/email"
+LOCAL_URL = re.compile(r"^http://(127\.0\.0\.1|localhost)(:[0-9]+)?/")
 LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 SUBJECT_MAX = 200
 BODY_MAX = 1_000_000
@@ -839,7 +912,19 @@ def find_token(env_file, var):
         value, where = os.environ.get(var), "the environment"
     if not value:
         fail(f"{var} isn't set in {where}")
+    if any(ord(c) < 33 or ord(c) == 127 for c in value):
+        fail(f"{var} has spaces or control characters")
     return value
+
+
+def api_url():
+    """Postmark's endpoint, or POSTMARK_API_URL for tests, which may only point at this Mac."""
+    override = os.environ.get("POSTMARK_API_URL")
+    if override is None:
+        return API_URL
+    if not LOCAL_URL.match(override):
+        fail("POSTMARK_API_URL may only point at a local test server")
+    return override
 
 
 def subject(run):
@@ -873,16 +958,19 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def send(token, message):
-    req = urllib.request.Request(API_URL, data=json.dumps(message).encode(), method="POST", headers={
-        "Accept": "application/json", "Content-Type": "application/json",
-        "X-Postmark-Server-Token": token})
+    url = api_url()
     try:
-        with urllib.request.build_opener(NoRedirect).open(req, timeout=20) as r:
-            status, raw = r.status, r.read(REPLY_MAX)
-    except urllib.error.HTTPError as e:
-        status, raw = e.code, e.read(REPLY_MAX)
-    except (urllib.error.URLError, OSError) as e:
-        fail(f"couldn't reach Postmark ({type(e).__name__})")
+        req = urllib.request.Request(url, data=json.dumps(message).encode(), method="POST", headers={
+            "Accept": "application/json", "Content-Type": "application/json",
+            "X-Postmark-Server-Token": token})
+        try:
+            response = urllib.request.build_opener(NoRedirect).open(req, timeout=20)
+        except urllib.error.HTTPError as e:
+            response = e
+        with response:
+            status, raw = response.code, response.read(REPLY_MAX)
+    except (OSError, ValueError, http.client.HTTPException) as e:  # URLError is an OSError
+        fail(f"couldn't reach Postmark ({type(e).__name__})", token)
     try:
         reply = json.loads(raw)
     except ValueError:
@@ -909,7 +997,7 @@ def main():
         fail("the payload on stdin isn't JSON")
     if not isinstance(run, dict):
         fail("the payload on stdin isn't a JSON object")
-    if run.get("version") != 1:
+    if type(run.get("version")) is not int or run["version"] != 1:
         fail("unsupported payload version")
     message = {"From": args.sender, "To": ", ".join(args.to), "Subject": subject(run),
                "TextBody": text_body(run), "MessageStream": args.message_stream}
@@ -963,6 +1051,8 @@ When a run finishes, the scheduler tries to send a macOS notification with the r
 ```markdown
 A run that starts while the last one is still going is skipped, with no notification. A job with a `notify` command sends its result through that command instead, and falls back to a notification if the command fails.
 ```
+
+- [ ] **Step 3b: README resume line.** In the **Looking into a run** bullet, replace `the run's log ends with a` with `the run's log includes a`, since a hook's output can follow that line.
 
 - [ ] **Step 4: README new section.** Insert this directly before `## Update`:
 
@@ -1035,7 +1125,7 @@ naming its one-way effects (for example, a job that marks mail as read can't und
 Then replace `Then check that record, the log, and that the notification appeared.` with:
 
 ```markdown
-Then check that record and the log. For a job without `notify`, check that the notification appeared. For a job with `notify`, check that the log has `notify hook: done` and that the message arrived. `notify hook failed` means the message didn't go out and the run fell back to a notification.
+Then check that record and the log. For a job without `notify`, check that the notification appeared. For a job with `notify`, wait until `list --json` shows `running` false, find `notify hook: done` after that run's `##### Started … · run <runId> #####` line, and check that the message arrived. `notify hook failed` means the hook didn't confirm delivery and the runner tried a notification instead.
 ```
 
 - [ ] **Step 9: Run all tests and commit,** after the gate.
