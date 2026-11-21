@@ -1,3 +1,5 @@
+<img src=".github/assets/logo.svg" alt="" width="96" height="96">
+
 # herdr-scheduled-jobs
 
 Schedule unattended Claude Code runs on your Mac. Ask Claude Code to "run /my-command every weekday at 5am", and launchd starts the run on time, even with every app closed. When a run finishes, the scheduler tries to send a macOS notification with the result. Click it to open the output on success or the log on failure. An optional Schedules tab in the [Herdr](https://herdr.dev) terminal app shows each job's next run and last result, with Run now, Pause, Log, and Open output buttons.
@@ -150,3 +152,7 @@ To move the clone, clone the repo in the new location and run `./install.sh --re
 `./uninstall.sh` removes the skill link if it points at this clone. If you haven't edited the mod files the installer put there, the script removes those files, the mod's marker, and the files `herdr-app check` generated. It then removes the mod folder if it's empty. It leaves other files alone. By default, it also leaves your jobs in place and prints the command to remove each one. To remove the jobs as well, run `./uninstall.sh --remove-jobs`.
 
 Remove your jobs before you delete the clone. A job whose `jobs.py` is gone fails without a notification, because the notification comes from `jobs.py`. Run history and logs stay in `~/.config/scheduled-jobs/`, and installer backups stay in `~/.config/herdr-scheduled-jobs/`. Delete those folders if you don't want them.
+
+## License
+
+MIT. See [LICENSE](LICENSE). This project isn't affiliated with Anthropic or Herdr.

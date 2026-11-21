@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="title">
+  <title id="title">herdr-scheduled-jobs logo: a clock face whose hour marks are run dots, with the hour hand on the next run</title>
+  <!-- A dark tile keeps the same contrast on light and dark pages. -->
+  <rect x="2" y="2" width="124" height="124" rx="28" fill="#161c26" stroke="#3a4558" stroke-width="2"/>
+  <!-- Hours 12 to 4: runs that finished. -->
+  <g fill="#3fb871">
+    <circle cx="64" cy="24" r="6"/>
+    <circle cx="84" cy="29.36" r="6"/>
+    <circle cx="98.64" cy="44" r="6"/>
+    <circle cx="104" cy="64" r="6"/>
+    <circle cx="98.64" cy="84" r="6"/>
+  </g>
+  <!-- Hour 5: the next run. -->
+  <circle cx="84" cy="98.64" r="6.5" fill="none" stroke="#f2b632" stroke-width="3.5"/>
+  <!-- Hours 6 to 11: still to come. -->
+  <g fill="#4a5568">
+    <circle cx="64" cy="104" r="4"/>
+    <circle cx="44" cy="98.64" r="4"/>
+    <circle cx="29.36" cy="84" r="4"/>
+    <circle cx="24" cy="64" r="4"/>
+    <circle cx="29.36" cy="44" r="4"/>
+    <circle cx="44" cy="29.36" r="4"/>
+  </g>
+  <!-- Hands at 5:00, the hour hand pointing at the next run. -->
+  <g stroke="#e8edf3" stroke-linecap="round">
+    <line x1="64" y1="64" x2="64" y2="37" stroke-width="5"/>
+    <line x1="64" y1="64" x2="75.5" y2="83.9" stroke-width="7"/>
+  </g>
+  <circle cx="64" cy="64" r="5.5" fill="#e8edf3"/>
+</svg>
