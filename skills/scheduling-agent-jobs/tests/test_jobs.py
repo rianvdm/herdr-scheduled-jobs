@@ -39,6 +39,13 @@ printf '%s\\n' "$*" >>"$FAKE_NOTIFIED"
 echo @CLOSED
 """
 
+FAKE_HOOK = """#!/bin/bash
+cat >"$FAKE_HOOK_OUT"
+echo "hook says hi"
+if [ -n "${FAKE_HOOK_SLEEP:-}" ]; then exec /bin/sleep "$FAKE_HOOK_SLEEP"; fi
+exit "${FAKE_HOOK_EXIT:-0}"
+"""
+
 
 class Cron(unittest.TestCase):
     def test_next_run_daily(self):
@@ -118,7 +125,7 @@ class Outcome(unittest.TestCase):
 class Exec(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        for name, body in (("claude", FAKE_CLAUDE), ("notifier", FAKE_NOTIFIER)):
+        for name, body in (("claude", FAKE_CLAUDE), ("notifier", FAKE_NOTIFIER), ("hook", FAKE_HOOK)):
             p = os.path.join(self.tmp, name)
             with open(p, "w") as f:
                 f.write(body)
@@ -133,6 +140,11 @@ class Exec(unittest.TestCase):
                         SCHEDULED_JOBS_NO_LAUNCHD="1", CLAUDE_BIN=os.path.join(self.tmp, "claude"),
                         NOTIFIER_BIN=os.path.join(self.tmp, "notifier"), FAKE_OUT=self.out,
                         FAKE_NOTIFIED=self.notified)
+        self.hook = os.path.join(self.tmp, "hook")
+        self.payload_path = os.path.join(self.tmp, "hook-payload.json")
+        self.env["FAKE_HOOK_OUT"] = self.payload_path
+        for key in ("NOTIFY_HOOK_BIN", "SCHEDULED_JOBS_HOOK_TIMEOUT", "FAKE_HOOK_SLEEP", "FAKE_HOOK_EXIT"):
+            self.env.pop(key, None)  # never inherit a real hook or test knobs from the shell
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -141,7 +153,7 @@ class Exec(unittest.TestCase):
         return subprocess.run(["/usr/bin/python3", JOBS, *args], env=dict(self.env, FAKE_MODE=mode),
                               capture_output=True, text=True, timeout=60)
 
-    def add(self, **over):
+    def add(self, check=True, **over):
         spec = {"name": "Morning triage", "slug": "triage", "schedule": "0 5 * * *", "workdir": self.tmp,
                 "prompt": "do it", "timeoutSeconds": 20, "label": "Triage", "expectedFile": self.out,
                 "open": ["/usr/bin/true", "clicked"], "countRegex": r"[0-9]+ emails? marked as read",
@@ -152,7 +164,8 @@ class Exec(unittest.TestCase):
         with open(p, "w") as f:
             json.dump(spec, f)
         r = self.jobs("add", p)
-        self.assertEqual(r.returncode, 0, r.stderr)
+        if check:
+            self.assertEqual(r.returncode, 0, r.stderr)
         return r
 
     def notification(self):
@@ -474,6 +487,31 @@ class Exec(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("Triage failed -message Out.md not updated.", self.notification())
         self.assertEqual(self.last_run()["source"], "manual")
+
+    def test_notify_must_be_a_command_list(self):
+        for bad in ({"command": []}, {"command": self.hook}, {"cmd": [self.hook]},
+                    {"command": [self.hook], "extra": 1}, {"command": [self.hook, 3]}):
+            r = self.add(check=False, notify=bad)
+            self.assertEqual(r.returncode, 1, bad)
+            self.assertIn('"notify" must be {"command"', r.stderr, bad)
+        r = self.add(check=False, notify=[self.hook])
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('"notify" must be a dict', r.stderr)
+
+    def test_notify_command_must_start_with_an_absolute_path(self):
+        r = self.add(check=False, notify={"command": ["hook"]})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('"notify" command must start with an absolute path', r.stderr)
+
+    def test_missing_hook_file_is_accepted_at_add(self):
+        self.add(notify={"command": [os.path.join(self.tmp, "not-yet")]})
+
+    def test_notify_arguments_expand_home(self):
+        self.env["HOME"] = self.tmp
+        self.add(notify={"command": ["~/hook", "--env-file", "~/.env"]})
+        with open(os.path.join(self.tmp, "home", "jobs", "triage.json")) as f:
+            command = json.load(f)["notify"]["command"]
+        self.assertEqual(command, [os.path.join(self.tmp, "hook"), "--env-file", os.path.join(self.tmp, ".env")])
 
     def test_bad_spec_rejected(self):
         p = os.path.join(self.tmp, "bad.json")
