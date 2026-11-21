@@ -122,6 +122,33 @@ class Outcome(unittest.TestCase):
         self.assertEqual((o["title"], o["message"]), ("Triage ready", "Finished."))
 
 
+class Tail(unittest.TestCase):
+    def write_log(self, lines):
+        f = tempfile.NamedTemporaryFile("w", delete=False)
+        f.write("\n".join(lines) + "\n")
+        f.close()
+        self.addCleanup(os.remove, f.name)
+        return f.name
+
+    def test_only_this_run_without_skip_lines(self):
+        p = self.write_log(["##### Started a · manual · run old1 #####", "old line",
+                            "##### Started b · manual · run new2 #####", "new line",
+                            "##### Skipped c: the previous run is still going #####", "last line"])
+        self.assertEqual(jobs.run_tail(p, "new2"),
+                         "##### Started b · manual · run new2 #####\nnew line\nlast line")
+
+    def test_line_cap_and_missing_marker(self):
+        p = self.write_log(["##### Started a · manual · run r1 #####"] + [f"line {i}" for i in range(80)])
+        tail = jobs.run_tail(p, "r1").splitlines()
+        self.assertEqual((len(tail), tail[-1]), (50, "line 79"))
+        self.assertEqual(jobs.run_tail(p, "nope"), "")
+
+    def test_needs_the_started_banner(self):
+        p = self.write_log(["##### Started a · manual · run r1 #####", "one", "echo · run r1 #####", "two"])
+        self.assertEqual(jobs.run_tail(p, "r1"),
+                         "##### Started a · manual · run r1 #####\none\necho · run r1 #####\ntwo")
+
+
 class Exec(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -167,6 +194,105 @@ class Exec(unittest.TestCase):
         if check:
             self.assertEqual(r.returncode, 0, r.stderr)
         return r
+
+    def payload(self):
+        with open(self.payload_path) as f:
+            return json.load(f)
+
+    FALLBACK = "The notify hook failed; see the log."
+
+    def test_notify_hook_replaces_notifier(self):
+        self.add(notify={"command": [self.hook]})
+        r = self.jobs("exec", "triage")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        p, run = self.payload(), self.last_run()
+        self.assertEqual((p["version"], p["status"], p["title"], p["message"], p["resultText"]),
+                         (1, "success", "Triage ready", "7 emails triaged.", "Done."))
+        self.assertEqual((p["runId"], p["slug"], p["expectedFile"], p["exitCode"]),
+                         (run["runId"], "triage", self.out, 0))
+        self.assertIn("→ Bash: gh auth status", p["logTail"])
+        self.assertIn("claude --resume sess-1", p["resumeHint"])
+        self.assertFalse(os.path.exists(self.notified))
+        self.assertIn("hook says hi", self.log())
+        self.assertIn("notify hook: done", self.log())
+
+    def test_notify_hook_gets_failures_and_timeouts(self):
+        self.add(notify={"command": [self.hook]})
+        self.jobs("exec", "triage", mode="fail")
+        p = self.payload()
+        self.assertEqual((p["status"], p["title"], p["error"], p["exitCode"]),
+                         ("failed", "Triage failed", "exit code 3, out.md not updated", 3))
+        self.add(notify={"command": [self.hook]}, timeoutSeconds=1)
+        self.jobs("exec", "triage", mode="hang")
+        self.assertEqual((self.payload()["status"], self.payload()["exitCode"]), ("timeout", 124))
+
+    def test_failing_hook_falls_back_to_notifier(self):
+        self.add(notify={"command": [self.hook]})
+        self.env["FAKE_HOOK_EXIT"] = "1"
+        r = self.jobs("exec", "triage")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(f"7 emails triaged. Click to open it. {self.FALLBACK}", self.notification())
+        self.assertIn("notify hook failed (exit 1)", self.log())
+        self.assertEqual(self.last_run()["status"], "success")
+
+    def test_hanging_hook_is_killed_and_falls_back(self):
+        self.add(notify={"command": [self.hook]})
+        self.env.update(FAKE_HOOK_SLEEP="10", SCHEDULED_JOBS_HOOK_TIMEOUT="1")
+        start = time.monotonic()
+        self.jobs("exec", "triage")
+        self.assertLess(time.monotonic() - start, 8)
+        self.assertIn(self.FALLBACK, self.notification())
+        self.assertIn("notify hook failed (timed out after 1s)", self.log())
+
+    def test_hook_deleted_after_add_falls_back(self):
+        self.add(notify={"command": [self.hook]})
+        os.remove(self.hook)
+        self.jobs("exec", "triage")
+        self.assertIn(self.FALLBACK, self.notification())
+        self.assertIn("notify hook failed (could not start: FileNotFoundError)", self.log())
+
+    def test_nul_in_hook_argument_falls_back(self):
+        self.add(notify={"command": [self.hook, "a\u0000b"]})
+        self.jobs("exec", "triage")
+        self.assertIn(self.FALLBACK, self.notification())
+        self.assertIn("notify hook failed (could not start: ValueError)", self.log())
+
+    def test_hook_bin_override(self):
+        self.add(notify={"command": ["/usr/bin/false"]})
+        self.env["NOTIFY_HOOK_BIN"] = self.hook
+        self.jobs("exec", "triage")
+        self.assertEqual(self.payload()["status"], "success")
+        self.assertIn("notify hook: done", self.log())
+
+    def test_empty_hook_bin_does_not_fall_through(self):
+        self.add(notify={"command": [self.hook]})
+        self.env["NOTIFY_HOOK_BIN"] = ""
+        self.jobs("exec", "triage")
+        self.assertFalse(os.path.exists(self.payload_path))
+        self.assertIn(self.FALLBACK, self.notification())
+
+    def test_relative_expected_file_resolves_against_workdir(self):
+        self.add(notify={"command": [self.hook]}, expectedFile="out.md")
+        r = self.jobs("exec", "triage")  # runs from the test's folder, not the job's
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.payload()["expectedFile"], self.out)
+
+    def test_bad_hook_timeout_is_ignored(self):
+        self.env["SCHEDULED_JOBS_HOOK_TIMEOUT"] = "soon"
+        self.add(notify={"command": [self.hook]})
+        self.jobs("exec", "triage")
+        self.assertIn("notify hook: done", self.log())
+
+    def test_skipped_runs_do_not_call_hook(self):
+        self.add(notify={"command": [self.hook]}, paused=True)
+        self.jobs("exec", "triage")
+        self.add(notify={"command": [self.hook]})
+        lock = os.path.join(self.tmp, "home", "locks", "triage.lock")
+        with open(lock, "a") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            self.jobs("exec", "triage")
+        self.assertFalse(os.path.exists(self.payload_path))
+        self.assertFalse(os.path.exists(self.notified))
 
     def notification(self):
         for _ in range(30):

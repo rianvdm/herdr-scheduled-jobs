@@ -45,6 +45,9 @@ SELF = os.path.realpath(__file__)
 LABEL_PREFIX = "local.scheduled-jobs."
 PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 KILL_GRACE_SECONDS = 10
+HOOK_TIMEOUT_DEFAULT = 60
+LOG_TAIL_LINES = 50
+TEXT_CAP_CHARS = 16384
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
@@ -766,9 +769,83 @@ def run_outcome(job, status, error, expected):
     return {"title": f"{label} done", "message": message, "action": show_log, "hint": "Click to see the log."}
 
 
+def run_tail(log_path, run_id):
+    """This run's part of the log: from its Started line, without other invocations' Skipped
+    lines, at most LOG_TAIL_LINES lines and TEXT_CAP_CHARS characters. Empty without the marker."""
+    marker = f"· run {run_id} #####"
+    try:
+        with open(log_path, errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    starts = [i for i, line in enumerate(lines) if line.startswith("##### Started") and line.endswith(marker)]
+    if not starts:
+        return ""
+    mine = [line for line in lines[starts[-1]:] if not line.startswith("##### Skipped")]
+    return "\n".join(mine[-LOG_TAIL_LINES:])[-TEXT_CAP_CHARS:]
+
+
+def cap(text):
+    return text[:TEXT_CAP_CHARS] if isinstance(text, str) else None
+
+
+def build_payload(job, entry, outcome, tx, resume, expected):
+    """Version 1 of what a notify hook gets on stdin. `expected` is the absolute path cmd_exec checked."""
+    result_text = (tx.result or {}).get("result")
+    return {"version": 1, "slug": job["slug"], "name": job["name"], "label": job.get("label", job["name"]),
+            "runId": entry["runId"], "source": entry["source"], "status": entry["status"],
+            "title": outcome["title"], "message": cap(outcome["message"]), "error": cap(entry["error"]),
+            "exitCode": entry["exitCode"], "startedAt": entry["startedAt"], "finishedAt": entry["finishedAt"],
+            "durationMs": entry["durationMs"], "expectedFile": expected, "logPath": path("log", job["slug"]),
+            "logTail": run_tail(path("log", job["slug"]), entry["runId"]), "sessionId": entry["sessionId"],
+            "resumeHint": resume,
+            "resultText": cap(result_text)}
+
+
+def hook_timeout():
+    """SCHEDULED_JOBS_HOOK_TIMEOUT (tests) when it is a positive integer, else the default."""
+    try:
+        value = int(os.environ.get("SCHEDULED_JOBS_HOOK_TIMEOUT", ""))
+    except ValueError:
+        return HOOK_TIMEOUT_DEFAULT
+    return value if value > 0 else HOOK_TIMEOUT_DEFAULT
+
+
+def run_hook(job, payload, tx):
+    """Run the job's notify command with the payload on stdin. Returns True when it exited 0.
+    Log lines name a fixed reason, never the command line."""
+    override = os.environ.get("NOTIFY_HOOK_BIN")  # tests and the skill's fake run
+    command = [override] if override is not None else job["notify"]["command"]  # "" fails to start
+    timeout = hook_timeout()
+    try:
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=tx.log, stderr=tx.log,
+                                cwd=job["workdir"], env=child_env(), start_new_session=True)
+    except (OSError, ValueError) as e:
+        failure = f"could not start: {type(e).__name__}"
+    else:
+        try:
+            proc.communicate(json.dumps(payload).encode("utf-8"), timeout=timeout)
+            failure = f"exit {proc.returncode}" if proc.returncode != 0 else None
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            failure = f"timed out after {timeout}s"
+    tx.write(f"notify hook failed ({failure})" if failure else "notify hook: done")
+    return failure is None
+
+
 def deliver(job, outcome, payload, tx):
-    """Tell the user how the run went."""
-    notify(outcome["title"], f'{outcome["message"]} {outcome["hint"]}', "scheduled-" + job["slug"],
+    """Tell the user how the run went: through the job's notify hook, or terminal-notifier.
+    A hook that fails, or a payload that couldn't be built (None), falls back to terminal-notifier."""
+    extra = ""
+    if job.get("notify"):
+        if payload is not None and run_hook(job, payload, tx):
+            return
+        extra = " The notify hook failed; see the log."
+    notify(outcome["title"], f'{outcome["message"]} {outcome["hint"]}{extra}', "scheduled-" + job["slug"],
            outcome["action"], tx)
 
 
@@ -834,6 +911,8 @@ def cmd_exec(args):
         return 0
 
     expected = job.get("expectedFile")
+    if expected and not os.path.isabs(expected):
+        expected = os.path.abspath(os.path.join(job["workdir"], expected))
     before = mtime(expected) if expected else 0.0
     binary = runner.find_binary(job) or "claude"
     argv = runner.argv(job, binary)
@@ -908,17 +987,25 @@ def cmd_exec(args):
 
     finished_at = now_iso()
     duration_ms = int((time.monotonic() - t0) * 1000)
-    record(slug, {"runId": run_id, "slug": slug, "source": source, "status": status, "exitCode": code,
-                  "error": error, "startedAt": started_at, "finishedAt": finished_at,
-                  "durationMs": duration_ms, "sessionId": tx.session_id,
-                  "costUsd": (tx.result or {}).get("total_cost_usd")})
+    entry = {"runId": run_id, "slug": slug, "source": source, "status": status, "exitCode": code,
+             "error": error, "startedAt": started_at, "finishedAt": finished_at,
+             "durationMs": duration_ms, "sessionId": tx.session_id,
+             "costUsd": (tx.result or {}).get("total_cost_usd")}
+    record(slug, entry)
     tx.write(f"##### Finished {finished_at} · {status} · exit {code} · {duration_ms // 1000}s"
              + (f" · {error}" if error else "") + " #####")
-    if tx.session_id:
-        tx.write(runner.resume_hint(job["workdir"], tx.session_id))
+    resume = runner.resume_hint(job["workdir"], tx.session_id) if tx.session_id else None
+    if resume:
+        tx.write(resume)
 
     outcome = run_outcome(job, status, error, expected)
-    deliver(job, outcome, None, tx)
+    payload = None
+    if job.get("notify"):
+        try:
+            payload = build_payload(job, entry, outcome, tx, resume, expected)
+        except Exception as e:  # a payload bug must not cost the user the result
+            tx.write(f"notify hook failed (payload: {type(e).__name__})")
+    deliver(job, outcome, payload, tx)
     return code
 
 
