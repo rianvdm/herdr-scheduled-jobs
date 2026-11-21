@@ -28,16 +28,18 @@ LOCAL_URL = re.compile(r"^http://(127\.0\.0\.1|localhost)(:[0-9]+)?/")
 LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 SUBJECT_MAX = 200
 BODY_MAX = 1_000_000
+HTML_MAX = 100_000  # longer reports go out as plain text only
+LINE_MAX = 10_000  # a longer line is escaped without inline formatting
 REPLY_MAX = 65536
 
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 BULLET = re.compile(r"^( *)[-*]\s+(.*)$")
 RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
 CODE_SPAN = re.compile(r"`([^`\n]+)`")
-LINK = re.compile(r"\[([^\]\n]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)")
+LINK = re.compile(r"\[([^\]\n]+)\]\(((?:[^()\s`\x00]|\([^()\s`\x00]*\))+)\)")
 BOLD = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*")
 STAR_EM = re.compile(r"\*(?!\s)(.+?)(?<!\s)\*")
-UNDERSCORE_EM = re.compile(r"(?<![A-Za-z0-9_])_(?!\s)(.+?)(?<!\s)_(?![A-Za-z0-9_])")
+UNDERSCORE_EM = re.compile(r"(?<![A-Za-z0-9_@])_(?!\s)(.+?)(?<!\s)_(?![A-Za-z0-9_])")
 SAFE_URL = re.compile(r"^(https?://|mailto:)", re.I)
 HOLE = re.compile("\x00(\\d+)\x00")
 
@@ -53,6 +55,8 @@ PRE_STYLE = (f"font-family:{MONO};font-size:13px;background:#f3f4f6;padding:10px
 
 def inline_html(text):
     """Escape one line of Markdown text, then add code, links, bold, and italics."""
+    if len(text) > LINE_MAX:  # the emphasis patterns are slow on huge lines
+        return html.escape(text.replace("\x00", ""), quote=True)
     holes = []
 
     def hide(markup):
@@ -281,7 +285,7 @@ def main():
         fail("unsupported payload version")
     message = {"From": args.sender, "To": ", ".join(args.to), "Subject": subject(run),
                "TextBody": text_body(run), "MessageStream": args.message_stream}
-    if markdown_report(run):
+    if markdown_report(run) and len(message["TextBody"]) <= HTML_MAX:
         message["HtmlBody"] = markdown_to_html(message["TextBody"])
     if run.get("slug"):
         message["Tag"] = run["slug"]
