@@ -328,7 +328,7 @@ def bootout(slug):
 
 REQUIRED = {"name": str, "slug": str, "schedule": str, "workdir": str, "prompt": str, "timeoutSeconds": int}
 OPTIONAL = {"label": str, "expectedFile": str, "open": (str, list), "countRegex": str, "countNoun": str,
-            "model": str, "paused": bool, "claudePath": str, "createdAt": str}
+            "model": str, "paused": bool, "claudePath": str, "createdAt": str, "notify": dict}
 
 
 def type_name(t):
@@ -368,6 +368,15 @@ def validate(spec):
             del spec[key]
     if isinstance(spec.get("open"), list) and not all(isinstance(a, str) for a in spec["open"]):
         die('"open" must be a path, a URL, or a command as a list of strings')
+    if "notify" in spec:
+        cmd = spec["notify"].get("command")
+        if (set(spec["notify"]) != {"command"} or not isinstance(cmd, list) or not cmd
+                or not all(isinstance(a, str) for a in cmd)):
+            die('"notify" must be {"command": [...]}, a non-empty list of strings')
+        spec["notify"] = {"command": [expand(a) for a in cmd]}
+        # The file isn't checked here, so relink never fails on a missing hook; the run falls back.
+        if not os.path.isabs(spec["notify"]["command"][0]):
+            die('"notify" command must start with an absolute path')
     if not SLUG_RE.match(spec["slug"]):
         die("slug must be lowercase letters, digits and dashes")
     if not os.path.isdir(spec["workdir"]):
