@@ -7,9 +7,11 @@ import importlib.util
 import json
 import os
 import shutil
+import re
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -271,12 +273,49 @@ class Sender(unittest.TestCase):
     def test_html_only_safe_link_schemes(self):
         out = self.html("[x](javascript:alert(1)) [y](JavaScript:alert(2)) [z](data:text/html,hi)")
         self.assertNotIn("<a", out)
-        self.assertIn("x", out)
+        self.assertIn("x (javascript:alert(1))", out)
         self.assertIn("javascript:alert(1)", out)
         out = self.html("[a](https://example.com/a?b=1&c=2) [m](mailto:me@example.com) [h](http://example.com)")
         self.assertEqual(out.count("<a "), 3)
         self.assertIn('href="https://example.com/a?b=1&amp;c=2"', out)
-        self.assertNotIn('"onmouseover', self.html('[q](https://example.com/"onmouseover=x)'))
+        out = self.html('[q](https://example.com/"onmouseover=x)')
+        self.assertIn('href="https://example.com/&quot;onmouseover=x"', out)
+        self.assertNotIn('"onmouseover', out)
+
+    def test_html_code_span_in_link_url_stays_out_of_href(self):
+        for md in ("[a](https://x.com/`y`)", "[a](https://x.com/`y`) and `z`", "[`c`](https://x.com/ok)"):
+            out = self.html(md)
+            self.assertNotIn('href="https://x.com/<', out, md)
+            self.assertNotIn("\x00", out, md)
+            for href in re.findall(r'href="([^"]*)"', out):
+                self.assertNotIn("<", href, md)
+        self.assertIn('<a href="https://x.com/ok"', self.html("[`c`](https://x.com/ok)"))
+
+    def test_html_hostile_input_is_fast(self):
+        for chunk in ("*a ", "_a ", "[a ", "`a "):
+            start = time.time()
+            out = self.html(chunk * 20000)
+            self.assertLess(time.time() - start, 1.0, chunk)
+            self.assertNotIn("<em", out)
+
+    def test_html_over_long_line_is_escaped_text(self):
+        out = self.html("**b** " + "<" * 10000)
+        self.assertNotIn("<strong", out)
+        self.assertIn("**b** &lt;", out)
+
+    def test_html_many_short_lines_still_render(self):
+        self.assertIn("<strong>b</strong>", self.html("**b**\n\n" * 5000))
+
+    def test_very_large_report_is_text_only(self):
+        with open(self.out, "w") as f:
+            f.write("# T\n\n" + "word\n\n" * 20000)
+        self.assertEqual(self.run_sender(self.success()).returncode, 0)
+        body = FakePostmark.received[0][1]
+        self.assertNotIn("HtmlBody", body)
+        self.assertIn("word", body["TextBody"])
+
+    def test_html_underscore_after_at_sign_is_not_emphasis(self):
+        self.assertNotIn("<em", self.html("@_akhaliq said and @foo_ replied"))
 
     def test_html_keeps_snake_case(self):
         out = self.html("see snake_case_name and _real_ emphasis")
