@@ -827,8 +827,8 @@ In step 4, after the fake-run code block, add:
 
 - [ ] **Step 4: Check for personal references**
 
-Run: `git diff main --stat && git diff main | grep -niE 'rianvdm|/Users/|elezea|cloudflare|product-ai' || echo clean`
-Expected: `clean`.
+Run: `git diff main | grep -nE "/Users/|$(id -un)" || echo clean`, then read the diff for private project names, domains, and email addresses other than `example.com`.
+Expected: `clean`, and none found by reading.
 
 - [ ] **Step 5: Run all tests and commit**
 
@@ -838,21 +838,3 @@ find . -name __pycache__ -prune -exec rm -rf {} +
 git add AGENTS.md README.md skills/scheduling-agent-jobs/SKILL.md
 git commit -m "Document the notify hook and the Postmark sender"
 ```
-
----
-
-## After the plan: bringing the x-mentions job live (product-ai, not this repo)
-
-These steps run after the branch is reviewed, and they need Rian's go-ahead before step 3.
-
-1. In `product-ai/scripts/scheduled-jobs/x-mentions.json`, replace the `open` key with this `notify` block, and change the command's "the scheduled job opens it from its notification instead" line in `.opencode/command/x-mentions.md` to say it emails the report.
-
-   ```json
-   "notify": {"command": ["/usr/bin/python3", "~/.claude/skills/scheduling-agent-jobs/scripts/notify_postmark.py",
-     "--from", "rian@elezea.com", "--to", "rian@cloudflare.com",
-     "--env-file", "~/git/product-ai/.env", "--token-var", "PRODUCT_AI_POSTMARK_TOKEN"]}
-   ```
-
-2. Run `jobs.py add scripts/scheduled-jobs/x-mentions.json` (paused), then do the skill's fake run with `NOTIFY_HOOK_BIN`.
-3. Send one real email by piping a sample payload into `notify_postmark.py`. This confirms that `rian@elezea.com` is a verified sender on the product-ai Postmark server.
-4. Offer the real run, which costs about $0.005 per matching post and advances `newest_id`. On a yes, run `resume x-mentions`, then `run x-mentions`, and check the email arrives.
